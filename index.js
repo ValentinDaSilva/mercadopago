@@ -34,9 +34,10 @@ app.post("/crear-preferencia", async (req, res) => {
             quantity: 1
         }],
         back_urls: {
-            success: "https://TU_WEB/success.html",
-            failure: "https://TU_WEB/failure.html"
-        },
+            success: "https://clasesparticularesutn.com.ar/success.html",
+            failure: "https://clasesparticularesutn.com.ar/failure.html"
+        }
+
         auto_return: "approved"
     };
 
