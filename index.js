@@ -17,7 +17,8 @@ const productos = {
     pack20_individual: { title: "Pack 20 Clases Individuales", price: 100000 },
     grupal_2: { title: "Clase Grupal 2 Horas", price: 6000 },
     pack10_grupal: { title: "Pack 10 Clases Grupales", price: 48000 },
-    pack20_grupal: { title: "Pack 20 Clases Grupales", price: 80000 }
+    pack20_grupal: { title: "Pack 20 Clases Grupales", price: 80000 },
+    prueba_100: { title: "Clase Particular de Prueba", price: 100 } // ✅ Clase de prueba agregada
 };
 
 app.post("/crear-preferencia", async (req, res) => {
@@ -37,7 +38,6 @@ app.post("/crear-preferencia", async (req, res) => {
             success: "https://clasesparticularesutn.com.ar/success.html",
             failure: "https://clasesparticularesutn.com.ar/failure.html"
         },
-
         auto_return: "approved"
     };
 
