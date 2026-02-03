@@ -36,9 +36,9 @@ app.post("/crear-preferencia", async (req, res) => {
         // Formato: correo|codigo1,codigo2
         external_reference: `${email}|${codigos}`,
         back_urls: {
-            success: "https://clasesparticularesutn.com.ar/success.html",
-            failure: "https://clasesparticularesutn.com.ar/failure.html",
-            pending: "https://clasesparticularesutn.com.ar/pending.html"
+            success: "https://clasesparticularesutn.com.ar/Pagos/Exito.html",
+            failure: "https://clasesparticularesutn.com.ar/Pagos/Fracaso.html",
+            pending: "https://clasesparticularesutn.com.ar/Pagos/Pendiente.html"
         },
         auto_return: "approved",
         // Importante: URL donde MP avisará del pago
