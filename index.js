@@ -13,6 +13,11 @@ mercadopago.configure({
     access_token: process.env.MP_ACCESS_TOKEN
 });
 
+app.get("/ping", (req, res) => {
+    res.send("ok");
+});
+
+
 app.post("/crear-preferencia", async (req, res) => {
     const { items, email } = req.body; 
 
