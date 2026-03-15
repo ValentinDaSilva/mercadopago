@@ -12,7 +12,10 @@ const io = new Server(server, { cors: { origin: "*" } });
 app.use(cors());
 app.use(express.json());
 
-// Configuración SDK v2
+// Log de variables para depuración (solo imprime si existen para no revelar todo)
+console.log("Iniciando servidor...");
+console.log("Configuración MP:", process.env.MP_ACCESS_TOKEN ? "Token detectado" : "ERROR: MP_ACCESS_TOKEN no definido");
+
 const client = new MercadoPagoConfig({ 
     accessToken: process.env.MP_ACCESS_TOKEN?.trim() 
 });
@@ -25,25 +28,33 @@ const ordenesPendientes = new Map();
 const socketClientes = new Map();
 
 io.on("connection", (socket) => {
+    console.log("Nuevo cliente Socket.io:", socket.id);
     socket.on("join", (ordenId) => {
+        console.log(`Socket ${socket.id} unido a orden: ${ordenId}`);
         socketClientes.set(ordenId, socket.id);
     });
 });
 
 async function procesarPagoAprobado(payment, items, email, ordenId) {
-    for (const i of items) {
-        await axios.post(GAS_URL, {
-            funcion: "registrarPagoAutomatico",
-            correo: email,
-            referencia: i.codigo || i.id,
-            orden: ordenId,
-            payment_id: payment.id,
-            monto: i.price || i.unit_price
-        });
+    try {
+        console.log("Enviando a Google Apps Script para orden:", ordenId);
+        for (const i of items) {
+            await axios.post(GAS_URL, {
+                funcion: "registrarPagoAutomatico",
+                correo: email,
+                referencia: i.codigo || i.id,
+                orden: ordenId,
+                payment_id: payment.id,
+                monto: i.price || i.unit_price
+            });
+        }
+    } catch (err) {
+        console.error("Error al registrar en GAS:", err.message);
     }
 }
 
 app.post("/crear-preferencia", async (req, res) => {
+    console.log("Recibida solicitud /crear-preferencia");
     try {
         const { items, email, nombre, apellido } = req.body;
         const ordenId = "orden_" + Date.now();
@@ -63,13 +74,16 @@ app.post("/crear-preferencia", async (req, res) => {
         });
 
         ordenesPendientes.set(ordenId, { items, email });
+        console.log("Preferencia creada exitosamente:", ordenId);
         res.json({ init_point: response.init_point, orden_id: ordenId });
     } catch (e) {
+        console.error("Error en /crear-preferencia:", e.message);
         res.status(500).json({ error: "Error en preferencia", details: e.message });
     }
 });
 
 app.post("/crear-qr", async (req, res) => {
+    console.log("Recibida solicitud /crear-qr para usuario:", MP_USER_ID);
     try {
         const { items, email } = req.body;
         const total = items.reduce((acc, i) => acc + Number(i.price), 0);
@@ -78,6 +92,7 @@ app.post("/crear-qr", async (req, res) => {
         ordenesPendientes.set(ordenId, { items, email });
 
         const url = `https://api.mercadopago.com/instore/orders/qr/seller/collectors/${MP_USER_ID}/pos/${MP_POS_ID}/qrs`;
+        
         const response = await axios.post(url, {
             external_reference: ordenId,
             title: "Pago clases",
@@ -85,22 +100,28 @@ app.post("/crear-qr", async (req, res) => {
             items: items.map(i => ({ title: i.title, unit_price: Number(i.price), quantity: 1, unit_measure: "unit", total_amount: Number(i.price) }))
         }, { headers: { "Authorization": `Bearer ${process.env.MP_ACCESS_TOKEN}` } });
 
+        console.log("QR creado con éxito para orden:", ordenId);
         res.json({ qr_data: response.data.qr_data, orden_id: ordenId });
     } catch (error) {
-        res.status(500).json({ error: "Error creando QR" });
+        console.error("Error completo en /crear-qr:", error.response?.data || error.message);
+        res.status(500).json({ error: "Error creando QR", details: error.message });
     }
 });
 
 app.post("/webhook", async (req, res) => {
-    try {
-        const paymentId = req.query.id || req.body.data?.id;
-        if (!paymentId) return res.sendStatus(200);
+    const paymentId = req.query.id || req.body.data?.id;
+    console.log("Webhook recibido. ID Pago:", paymentId);
+    
+    if (!paymentId) return res.sendStatus(200);
 
+    try {
         const response = await axios.get(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
             headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
         });
         
         const payment = response.data;
+        console.log("Estado del pago:", payment.status, "Ref:", payment.external_reference);
+
         if (payment.status === "approved") {
             const ordenId = payment.external_reference;
             const datos = ordenesPendientes.get(ordenId);
@@ -108,14 +129,17 @@ app.post("/webhook", async (req, res) => {
             if (datos) {
                 await procesarPagoAprobado(payment, datos.items, datos.email, ordenId);
                 const socketId = socketClientes.get(ordenId);
-                if (socketId) io.to(socketId).emit("pago_aprobado", { success: true });
-                
+                if (socketId) {
+                    console.log("Notificando éxito por socket a:", socketId);
+                    io.to(socketId).emit("pago_aprobado", { success: true });
+                }
                 ordenesPendientes.delete(ordenId);
                 socketClientes.delete(ordenId);
             }
         }
         res.sendStatus(200);
     } catch (e) {
+        console.error("Error en Webhook:", e.message);
         res.sendStatus(200);
     }
 });
@@ -123,4 +147,4 @@ app.post("/webhook", async (req, res) => {
 app.get("/ping", (req, res) => res.status(200).send("OK"));
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log("Servidor OK en puerto " + PORT));
+server.listen(PORT, () => console.log("Servidor escuchando en puerto " + PORT));
