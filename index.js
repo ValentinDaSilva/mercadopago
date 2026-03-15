@@ -87,54 +87,65 @@ app.post("/crear-qr", async (req, res) => {
         res.status(500).json({ error: "Error creando QR", details: error.response?.data });
     }
 });
-
-// --- WEBHOOK ---
 app.post("/webhook", async (req, res) => {
-    // 1. Identificamos el ID del pago
-    const paymentId = req.query.id || req.body.data?.id;
-    console.log("--- WEBHOOK RECIBIDO --- ID:", paymentId);
-    
-    if (!paymentId) return res.sendStatus(200);
+    // 1. Logs de diagnóstico para saber qué nos está enviando MP
+    console.log("--- NUEVO WEBHOOK RECIBIDO ---");
+    console.log("Query Params:", JSON.stringify(req.query));
+    console.log("Body:", JSON.stringify(req.body));
+
+    // 2. Extraer el ID del pago (soporta ambos formatos: query o body)
+    const paymentId = req.query.id || req.body.data?.id || req.body.id;
+
+    if (!paymentId) {
+        console.warn("Webhook recibido sin ID de pago. Ignorando...");
+        return res.sendStatus(200);
+    }
 
     try {
-        // 2. Consultamos el pago a Mercado Pago
+        // 3. Consultar el estado real del pago en la API de Mercado Pago
         const { data } = await axios.get(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
-            headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
+            headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN?.trim()}` }
         });
 
-        console.log("Estado del pago:", data.status);
-        console.log("Referencia externa:", data.external_reference);
+        console.log(`Estado del pago ${paymentId}: ${data.status}`);
 
+        // 4. Solo procesar si el pago está aprobado
         if (data.status === "approved") {
-            // 3. Notificar por socket (esto ya sabías que funciona)
-            const socketId = socketClientes.get(data.external_reference);
-            if (socketId) io.to(socketId).emit("pago_aprobado", { success: true });
+            const ordenId = data.external_reference;
+            const email = data.payer?.email || "sin_correo";
 
-            // 4. LOG DE DIAGNÓSTICO PARA GAS
-            console.log("Preparando envío a GAS...");
-            const payload = {
+            // A. Notificar al frontend por WebSockets
+            const socketId = socketClientes.get(ordenId);
+            if (socketId) {
+                console.log(`Notificando éxito por socket a: ${socketId}`);
+                io.to(socketId).emit("pago_aprobado", { success: true, paymentId });
+            }
+
+            // B. Enviar datos a Google Apps Script
+            console.log("Preparando envío a Google Sheets...");
+            const gasResponse = await axios.post(GAS_URL, {
                 funcion: "registrarPagoAutomatico",
-                correo: data.payer?.email || "sin_correo",
-                referencia: data.external_reference || "sin_ref",
-                orden: data.external_reference,
+                correo: email,
+                referencia: data.external_reference,
+                orden: ordenId,
                 payment_id: paymentId,
                 monto: data.transaction_amount
-            };
-            console.log("Payload enviado a GAS:", payload);
-
-            // 5. Enviamos a GAS
-            const gasResponse = await axios.post(GAS_URL, payload);
-            console.log("Respuesta de GAS:", gasResponse.data);
+            });
+            
+            console.log("Respuesta de GAS:", gasResponse.status);
+            
+            // C. Limpiar memoria local
+            socketClientes.delete(ordenId);
         }
+        
+        // 5. Siempre responder 200 a Mercado Pago para confirmar recepción
         res.sendStatus(200);
     } catch (e) {
-        console.error("Error en Webhook:", e.message);
-        // Si hay error en la petición a GAS, se verá aquí
-        if (e.response) console.error("Error respuesta GAS:", e.response.data);
-        res.sendStatus(200);
+        console.error("Error crítico en Webhook:", e.message);
+        if (e.response) console.error("Detalle error externo:", e.response.data);
+        res.sendStatus(200); // Respondemos 200 para que MP deje de intentar
     }
 });
-
 
 
 const PORT = process.env.PORT || 3000;
