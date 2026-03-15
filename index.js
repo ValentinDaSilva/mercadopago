@@ -88,7 +88,7 @@ app.post("/crear-preferencia", async (req, res) => {
 });
 
 app.post("/crear-qr", async (req, res) => {
-    console.log("Recibida solicitud /crear-qr para usuario:", MP_USER_ID);
+    console.log("Recibida solicitud /crear-qr");
     try {
         const { items, email } = req.body;
         const total = items.reduce((acc, i) => acc + Number(i.price), 0);
@@ -102,7 +102,15 @@ app.post("/crear-qr", async (req, res) => {
             external_reference: ordenId,
             title: "Pago clases",
             total_amount: total,
-            items: items.map(i => ({ title: i.title, unit_price: Number(i.price), quantity: 1, unit_measure: "unit", total_amount: Number(i.price) }))
+            items: items.map(i => ({ 
+                title: i.title, 
+                unit_price: Number(i.price), 
+                quantity: 1, 
+                unit_measure: "unit", 
+                total_amount: Number(i.price),
+                // ESTA LÍNEA ES LA QUE CORRIGE EL ERROR 400:
+                description: i.description || "Pago de clase" 
+            }))
         }, { headers: { "Authorization": `Bearer ${process.env.MP_ACCESS_TOKEN}` } });
 
         console.log("QR creado con éxito para orden:", ordenId);
