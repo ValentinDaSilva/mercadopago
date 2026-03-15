@@ -50,9 +50,7 @@ app.post("/crear-preferencia", async (req, res) => {
 app.post("/crear-qr", async (req, res) => {
     const { items, email, external_reference } = req.body;
     
-    // Validación de entrada
     if (!external_reference || !items || items.length === 0) {
-        console.error("[VALIDACIÓN] Datos incompletos recibidos:", req.body);
         return res.status(400).json({ error: "Datos incompletos" });
     }
 
@@ -64,14 +62,17 @@ app.post("/crear-qr", async (req, res) => {
         
         const payload = {
             external_reference: external_reference,
-            title: "Pago clases",
+            title: "Pago de clases",
+            description: "Pago de clases particulares UTN", // Descripción general obligatoria
             total_amount: total,
             items: items.map(i => ({ 
                 title: i.title, 
                 unit_price: Number(i.price), 
                 quantity: 1, 
                 total_amount: Number(i.price),
-                unit_measure: "unit" 
+                unit_measure: "unit",
+                // ESTA ES LA LÍNEA QUE FALTABA PARA CADA ITEM:
+                description: "Clase particular universitaria" 
             }))
         };
 
