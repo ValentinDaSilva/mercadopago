@@ -86,7 +86,6 @@ app.post("/crear-preferencia", async (req, res) => {
         res.status(500).json({ error: "Error en preferencia", details: e.message });
     }
 });
-
 app.post("/crear-qr", async (req, res) => {
     console.log("Recibida solicitud /crear-qr");
     try {
@@ -101,23 +100,30 @@ app.post("/crear-qr", async (req, res) => {
         const response = await axios.post(url, {
             external_reference: ordenId,
             title: "Pago clases",
+            description: "Pago de servicios educativos", // Descripción de la orden
             total_amount: total,
             items: items.map(i => ({ 
                 title: i.title, 
+                description: i.description || "Clase personalizada", // Descripción del ítem
                 unit_price: Number(i.price), 
                 quantity: 1, 
                 unit_measure: "unit", 
-                total_amount: Number(i.price),
-                // ESTA LÍNEA ES LA QUE CORRIGE EL ERROR 400:
-                description: i.description || "Pago de clase" 
+                total_amount: Number(i.price) 
             }))
-        }, { headers: { "Authorization": `Bearer ${process.env.MP_ACCESS_TOKEN}` } });
+        }, { 
+            headers: { 
+                "Authorization": `Bearer ${process.env.MP_ACCESS_TOKEN}`,
+                "Content-Type": "application/json" 
+            } 
+        });
 
         console.log("QR creado con éxito para orden:", ordenId);
         res.json({ qr_data: response.data.qr_data, orden_id: ordenId });
     } catch (error) {
-        console.error("Error completo en /crear-qr:", error.response?.data || error.message);
-        res.status(500).json({ error: "Error creando QR", details: error.message });
+        // Mostramos el cuerpo que enviamos para detectar fallos en la estructura
+        console.error("Error en QR. Respuesta API:", error.response?.data?.message);
+        console.error("Causa del error:", error.response?.data?.causes);
+        res.status(500).json({ error: "Error creando QR", details: error.response?.data?.message });
     }
 });
 
