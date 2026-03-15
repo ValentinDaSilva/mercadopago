@@ -1,43 +1,32 @@
 const express = require("express");
 const cors = require("cors");
-const mercadopago = require("mercadopago");
+const { MercadoPagoConfig, Preference } = require("mercadopago");
 const axios = require("axios");
 const http = require("http");
 const { Server } = require("socket.io");
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, {
-    cors: { origin: "*" } // Ajusta esto a tu dominio real por seguridad
-});
+const io = new Server(server, { cors: { origin: "*" } });
 
 app.use(cors());
 app.use(express.json());
 
+// Configuración SDK v2
+const client = new MercadoPagoConfig({ 
+    accessToken: process.env.MP_ACCESS_TOKEN?.trim() 
+});
+
 const GAS_URL = "https://script.google.com/macros/s/AKfycbwvSTFpClvlYupAvfgpR7YTvd90x7AN0t4EJZ5x7xarJ-ga1wRtWxNTDDy-Wm4judEX/exec";
-const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN?.trim();
 const MP_USER_ID = process.env.MP_USER_ID?.trim();
 const MP_POS_ID = process.env.MP_POS_ID?.trim();
 
-mercadopago.configure({ access_token: MP_ACCESS_TOKEN });
-
-// Memoria temporal
 const ordenesPendientes = new Map();
-const socketClientes = new Map(); // Mapa de ordenId -> socketId
+const socketClientes = new Map();
 
-// Gestión de conexiones Socket.io
 io.on("connection", (socket) => {
-    console.log("Cliente conectado:", socket.id);
-    
     socket.on("join", (ordenId) => {
         socketClientes.set(ordenId, socket.id);
-    });
-
-    socket.on("disconnect", () => {
-        // Limpieza básica al desconectar
-        for (let [ordenId, id] of socketClientes.entries()) {
-            if (id === socket.id) socketClientes.delete(ordenId);
-        }
     });
 });
 
@@ -59,19 +48,24 @@ app.post("/crear-preferencia", async (req, res) => {
         const { items, email, nombre, apellido } = req.body;
         const ordenId = "orden_" + Date.now();
 
-        const preference = {
-            items: items.map(i => ({ id: i.codigo, title: i.title, quantity: 1, unit_price: Number(i.price), currency_id: "ARS" })),
-            payer: { email: email, first_name: nombre, last_name: apellido },
-            external_reference: ordenId,
-            auto_return: "approved",
-            binary_mode: true
-        };
+        const preference = new Preference(client);
+        const response = await preference.create({
+            body: {
+                items: items.map(i => ({ 
+                    id: i.codigo, title: i.title, quantity: 1, 
+                    unit_price: Number(i.price), currency_id: "ARS" 
+                })),
+                payer: { email: email, first_name: nombre, last_name: apellido },
+                external_reference: ordenId,
+                auto_return: "approved",
+                binary_mode: true
+            }
+        });
 
-        const response = await mercadopago.preferences.create(preference);
         ordenesPendientes.set(ordenId, { items, email });
-        res.json({ init_point: response.body.init_point, orden_id: ordenId });
+        res.json({ init_point: response.init_point, orden_id: ordenId });
     } catch (e) {
-        res.status(500).json({ error: "Error en preferencia" });
+        res.status(500).json({ error: "Error en preferencia", details: e.message });
     }
 });
 
@@ -89,7 +83,7 @@ app.post("/crear-qr", async (req, res) => {
             title: "Pago clases",
             total_amount: total,
             items: items.map(i => ({ title: i.title, unit_price: Number(i.price), quantity: 1, unit_measure: "unit", total_amount: Number(i.price) }))
-        }, { headers: { "Authorization": `Bearer ${MP_ACCESS_TOKEN}` } });
+        }, { headers: { "Authorization": `Bearer ${process.env.MP_ACCESS_TOKEN}` } });
 
         res.json({ qr_data: response.data.qr_data, orden_id: ordenId });
     } catch (error) {
@@ -103,7 +97,7 @@ app.post("/webhook", async (req, res) => {
         if (!paymentId) return res.sendStatus(200);
 
         const response = await axios.get(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
-            headers: { Authorization: `Bearer ${MP_ACCESS_TOKEN}` }
+            headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
         });
         
         const payment = response.data;
@@ -113,12 +107,8 @@ app.post("/webhook", async (req, res) => {
 
             if (datos) {
                 await procesarPagoAprobado(payment, datos.items, datos.email, ordenId);
-                
-                // NOTIFICAR AL CLIENTE ESPECÍFICO
                 const socketId = socketClientes.get(ordenId);
-                if (socketId) {
-                    io.to(socketId).emit("pago_aprobado", { success: true, paymentId: payment.id });
-                }
+                if (socketId) io.to(socketId).emit("pago_aprobado", { success: true });
                 
                 ordenesPendientes.delete(ordenId);
                 socketClientes.delete(ordenId);
@@ -131,4 +121,4 @@ app.post("/webhook", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log("Servidor corriendo en puerto " + PORT));
+server.listen(PORT, () => console.log("Servidor OK en puerto " + PORT));
