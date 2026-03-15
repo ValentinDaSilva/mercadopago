@@ -124,13 +124,21 @@ app.post("/webhook", async (req, res) => {
                 console.warn(`[WEBHOOK] ALERTA: No se encontró socket para ${data.external_reference}. Clientes activos: ${socketClientes.size}`);
             }
 
-            await axios.post(GAS_URL, {
+            // --- AQUÍ ESTÁ EL CAMBIO ---
+            const payloadGAS = {
                 funcion: "registrarPagoAutomatico",
                 correo: data.payer?.email || "sin_correo",
                 referencia: data.external_reference,
                 payment_id: paymentId,
                 monto: data.transaction_amount
-            });
+            };
+            
+            console.log("[GAS] Enviando payload:", JSON.stringify(payloadGAS, null, 2));
+            
+            await axios.post(GAS_URL, payloadGAS);
+            console.log("[GAS] Registro enviado correctamente.");
+            // ---------------------------
+            
             socketClientes.delete(data.external_reference);
         }
         res.sendStatus(200);
