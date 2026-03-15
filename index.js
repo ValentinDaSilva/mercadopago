@@ -2,26 +2,46 @@ const express = require("express");
 const cors = require("cors");
 const mercadopago = require("mercadopago");
 const axios = require("axios");
+const http = require("http");
+const { Server } = require("socket.io");
 
 const app = express();
+const server = http.createServer(app);
+const io = new Server(server, {
+    cors: { origin: "*" } // Ajusta esto a tu dominio real por seguridad
+});
+
 app.use(cors());
 app.use(express.json());
 
 const GAS_URL = "https://script.google.com/macros/s/AKfycbwvSTFpClvlYupAvfgpR7YTvd90x7AN0t4EJZ5x7xarJ-ga1wRtWxNTDDy-Wm4judEX/exec";
 const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN?.trim();
 const MP_USER_ID = process.env.MP_USER_ID?.trim();
-const MP_POS_ID = process.env.MP_POS_ID?.trim(); // Ejemplo: "CAJAWEB"
+const MP_POS_ID = process.env.MP_POS_ID?.trim();
 
 mercadopago.configure({ access_token: MP_ACCESS_TOKEN });
 
-// Memoria temporal: Guarda la orden antes de que el usuario pague
+// Memoria temporal
 const ordenesPendientes = new Map();
+const socketClientes = new Map(); // Mapa de ordenId -> socketId
 
-/* ===============================
-   FUNCIÓN CENTRAL DE REGISTRO (Lógica compartida)
-================================ */
+// Gestión de conexiones Socket.io
+io.on("connection", (socket) => {
+    console.log("Cliente conectado:", socket.id);
+    
+    socket.on("join", (ordenId) => {
+        socketClientes.set(ordenId, socket.id);
+    });
+
+    socket.on("disconnect", () => {
+        // Limpieza básica al desconectar
+        for (let [ordenId, id] of socketClientes.entries()) {
+            if (id === socket.id) socketClientes.delete(ordenId);
+        }
+    });
+});
+
 async function procesarPagoAprobado(payment, items, email, ordenId) {
-    console.log("Registrando en GAS para orden:", ordenId);
     for (const i of items) {
         await axios.post(GAS_URL, {
             funcion: "registrarPagoAutomatico",
@@ -34,9 +54,6 @@ async function procesarPagoAprobado(payment, items, email, ordenId) {
     }
 }
 
-/* ===============================
-   CHECKOUT PRO (Link)
-================================ */
 app.post("/crear-preferencia", async (req, res) => {
     try {
         const { items, email, nombre, apellido } = req.body;
@@ -51,7 +68,6 @@ app.post("/crear-preferencia", async (req, res) => {
         };
 
         const response = await mercadopago.preferences.create(preference);
-        // Guardamos para el webhook (aunque MP lo envía, esto unifica el flujo)
         ordenesPendientes.set(ordenId, { items, email });
         res.json({ init_point: response.body.init_point, orden_id: ordenId });
     } catch (e) {
@@ -59,16 +75,12 @@ app.post("/crear-preferencia", async (req, res) => {
     }
 });
 
-/* ===============================
-   QR DINÁMICO
-================================ */
 app.post("/crear-qr", async (req, res) => {
     try {
         const { items, email } = req.body;
         const total = items.reduce((acc, i) => acc + Number(i.price), 0);
         const ordenId = "ordenQR_" + Date.now();
 
-        // GUARDADO DE SEGURIDAD: Antes de crear el QR
         ordenesPendientes.set(ordenId, { items, email });
 
         const url = `https://api.mercadopago.com/instore/orders/qr/seller/collectors/${MP_USER_ID}/pos/${MP_POS_ID}/qrs`;
@@ -85,9 +97,6 @@ app.post("/crear-qr", async (req, res) => {
     }
 });
 
-/* ===============================
-   WEBHOOK ÚNICO
-================================ */
 app.post("/webhook", async (req, res) => {
     try {
         const paymentId = req.query.id || req.body.data?.id;
@@ -104,7 +113,15 @@ app.post("/webhook", async (req, res) => {
 
             if (datos) {
                 await procesarPagoAprobado(payment, datos.items, datos.email, ordenId);
-                ordenesPendientes.delete(ordenId); // Limpiamos memoria
+                
+                // NOTIFICAR AL CLIENTE ESPECÍFICO
+                const socketId = socketClientes.get(ordenId);
+                if (socketId) {
+                    io.to(socketId).emit("pago_aprobado", { success: true, paymentId: payment.id });
+                }
+                
+                ordenesPendientes.delete(ordenId);
+                socketClientes.delete(ordenId);
             }
         }
         res.sendStatus(200);
@@ -114,4 +131,4 @@ app.post("/webhook", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("Servidor activo puerto " + PORT));
+server.listen(PORT, () => console.log("Servidor corriendo en puerto " + PORT));
