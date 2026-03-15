@@ -88,63 +88,90 @@ app.post("/crear-qr", async (req, res) => {
         res.status(500).json({ error: "Error creando QR", details: error.response?.data });
     }
 });
+
 app.post("/webhook", async (req, res) => {
-    // 1. Logs de diagnóstico para saber qué nos está enviando MP
-    console.log("--- NUEVO WEBHOOK RECIBIDO ---");
+    // 1. Logs de entrada crudos
+    console.log("--- WEBHOOK RECIBIDO ---");
     console.log("Query Params:", JSON.stringify(req.query));
     console.log("Body:", JSON.stringify(req.body));
+    
+    // Identificar tipo de notificación
+    const topic = req.query.topic || req.query.type || req.body.type;
+    const dataId = req.query.id || req.body.data?.id || req.body.id;
 
-    // 2. Extraer el ID del pago (soporta ambos formatos: query o body)
-    const paymentId = req.query.id || req.body.data?.id || req.body.id;
-
-    if (!paymentId) {
-        console.warn("Webhook recibido sin ID de pago. Ignorando...");
+    if (!dataId) {
+        console.warn("Webhook sin ID detectado, ignorando...");
         return res.sendStatus(200);
     }
 
     try {
-        // 3. Consultar el estado real del pago en la API de Mercado Pago
+        let paymentId = dataId;
+
+        // 2. Lógica para Merchant Orders (QR)
+        if (topic === "merchant_order" || topic === "topic_merchant_order_wh") {
+            console.log("Detectada Merchant Order (ID:", dataId, "). Consultando orden...");
+            const orderResponse = await axios.get(`https://api.mercadopago.com/merchant_orders/${dataId}`, {
+                headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN?.trim()}` }
+            });
+            
+            console.log("Respuesta de Orden:", JSON.stringify(orderResponse.data));
+            const approvedPayment = orderResponse.data.payments.find(p => p.status === 'approved');
+            
+            if (approvedPayment) {
+                paymentId = approvedPayment.id;
+                console.log("Pago encontrado dentro de la orden. ID:", paymentId);
+            } else {
+                console.log("No se encontró pago aprobado en esta orden aún.");
+                return res.sendStatus(200);
+            }
+        }
+
+        // 3. Consultar estado del pago
+        console.log("Consultando estado del pago en API:", paymentId);
         const { data } = await axios.get(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
             headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN?.trim()}` }
         });
 
-        console.log(`Estado del pago ${paymentId}: ${data.status}`);
+        console.log("Estado final del pago:", data.status);
 
-        // 4. Solo procesar si el pago está aprobado
         if (data.status === "approved") {
-            const ordenId = data.external_reference;
-            const email = data.payer?.email || "sin_correo";
-
-            // A. Notificar al frontend por WebSockets
-            const socketId = socketClientes.get(ordenId);
+            console.log("Procesando pago aprobado. Referencia:", data.external_reference);
+            
+            // 4. Notificación vía Socket
+            const socketId = socketClientes.get(data.external_reference);
             if (socketId) {
-                console.log(`Notificando éxito por socket a: ${socketId}`);
+                console.log("Socket encontrado, emitiendo pago_aprobado a:", socketId);
                 io.to(socketId).emit("pago_aprobado", { success: true, paymentId });
+            } else {
+                console.log("No se encontró socket activo para la orden:", data.external_reference);
             }
 
-            // B. Enviar datos a Google Apps Script
-            console.log("Preparando envío a Google Sheets...");
-            const gasResponse = await axios.post(GAS_URL, {
+            // 5. Envío a Google Apps Script
+            const payload = {
                 funcion: "registrarPagoAutomatico",
-                correo: email,
+                correo: data.payer?.email || "sin_correo",
                 referencia: data.external_reference,
-                orden: ordenId,
+                orden: data.external_reference,
                 payment_id: paymentId,
                 monto: data.transaction_amount
-            });
+            };
+            console.log("Payload a enviar a GAS:", JSON.stringify(payload));
             
-            console.log("Respuesta de GAS:", gasResponse.status);
+            const gasResponse = await axios.post(GAS_URL, payload);
+            console.log("Respuesta de GAS (Status):", gasResponse.status);
+            console.log("Cuerpo de respuesta GAS:", JSON.stringify(gasResponse.data));
             
-            // C. Limpiar memoria local
-            socketClientes.delete(ordenId);
+            socketClientes.delete(data.external_reference);
         }
         
-        // 5. Siempre responder 200 a Mercado Pago para confirmar recepción
         res.sendStatus(200);
     } catch (e) {
-        console.error("Error crítico en Webhook:", e.message);
-        if (e.response) console.error("Detalle error externo:", e.response.data);
-        res.sendStatus(200); // Respondemos 200 para que MP deje de intentar
+        console.error("--- ERROR EN WEBHOOK ---");
+        console.error("Mensaje:", e.message);
+        if (e.response) {
+            console.error("Datos error API:", JSON.stringify(e.response.data));
+        }
+        res.sendStatus(200);
     }
 });
 
