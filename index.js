@@ -51,6 +51,7 @@ app.post("/crear-preferencia", async (req, res) => {
                 binary_mode: true
             }
         });
+        console.log("Preferencia creada:", response);
         res.json({ init_point: response.init_point, orden_id: ordenId });
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -80,7 +81,7 @@ app.post("/crear-qr", async (req, res) => {
                 total_amount: Number(i.price)
             }))
         }, { headers: { "Authorization": `Bearer ${process.env.MP_ACCESS_TOKEN}` } });
-
+        console.log("QR creado:", response.data);
         res.json({ qr_data: response.data.qr_data, orden_id: ordenId });
     } catch (error) {
         console.error("Error QR:", error.response?.data || error.message);
