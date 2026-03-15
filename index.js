@@ -69,6 +69,11 @@ app.post("/crear-preferencia", async (req, res) => {
                 payer: { email: email, first_name: nombre, last_name: apellido },
                 external_reference: ordenId,
                 auto_return: "approved",
+                back_urls: {
+                    success: "https://clasesparticularesutn.com.ar/Pagos/Exito.html", // Cambia esto por tu URL de éxito
+                    failure: "https://clasesparticularesutn.com.ar/Pagos/Fracaso.html", // Cambia esto por tu URL de fracaso
+                    pending: "https://clasesparticularesutn.com.ar/Pagos/Pendiente.html" // Cambia esto por tu URL de pendiente
+                },
                 binary_mode: true
             }
         });
