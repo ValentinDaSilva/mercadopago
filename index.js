@@ -22,28 +22,29 @@ const socketClientes = new Map();
 io.on("connection", (socket) => {
     socket.on("join", (ordenId) => {
         socketClientes.set(ordenId, socket.id);
-        console.log(`[SOCKET] Cliente unido. Orden: ${ordenId} | SocketID: ${socket.id}`);
+        console.log(`[SOCKET] Cliente unido: ${ordenId}`);
     });
 });
+
+// Función auxiliar para empaquetar datos
+const getExternalReference = (data) => JSON.stringify(data);
 
 app.post("/crear-preferencia", async (req, res) => {
     try {
         const { items, email, referencias, external_reference } = req.body;
-        console.log(`[PREFERENCIA] Creando para: ${external_reference}`);
-        
+        const refData = getExternalReference({ id: external_reference, email, referencias });
+
         const preference = new Preference(client);
         const response = await preference.create({
             body: {
                 items: items.map(i => ({ id: i.codigo, title: i.title, quantity: 1, currency_id: "ARS", unit_price: Number(i.price) })),
                 payer: { email: email },
-                external_reference: external_reference,
-                metadata: { referencias: referencias, correo: email }, // Guardamos metadata
+                external_reference: refData, // Pasamos el JSON stringificado
                 binary_mode: true
             }
         });
         res.json({ init_point: response.init_point });
     } catch (e) {
-        console.error("[ERROR PREFERENCIA]", e.message);
         res.status(500).json({ error: e.message });
     }
 });
@@ -51,29 +52,21 @@ app.post("/crear-preferencia", async (req, res) => {
 app.post("/crear-qr", async (req, res) => {
     const { items, email, referencias, external_reference } = req.body;
     
-    if (!external_reference || !items || items.length === 0) {
-        return res.status(400).json({ error: "Datos incompletos" });
-    }
+    if (!external_reference || !items?.length) return res.status(400).json({ error: "Datos incompletos" });
 
     try {
-        console.log(`[QR] Iniciando para: ${external_reference}`);
         const total = items.reduce((acc, i) => acc + Number(i.price), 0);
+        const refData = getExternalReference({ id: external_reference, email, referencias });
+        
         const url = `https://api.mercadopago.com/instore/orders/qr/seller/collectors/${MP_USER_ID}/pos/${MP_POS_ID}/qrs`;
         
         const payload = {
-            external_reference: external_reference,
+            external_reference: refData, // Pasamos el JSON stringificado
             title: "Pago de clases",
-            description: "Pago de clases particulares UTN",
             total_amount: total,
-            // Guardamos referencias y correo en metadata para recuperar luego
-            metadata: { referencias: referencias, correo: email },
             items: items.map(i => ({ 
-                title: i.title, 
-                unit_price: Number(i.price), 
-                quantity: 1, 
-                total_amount: Number(i.price),
-                unit_measure: "unit",
-                description: "Clase particular universitaria" 
+                title: i.title, unit_price: Number(i.price), quantity: 1, 
+                total_amount: Number(i.price), unit_measure: "unit", description: "Clase particular" 
             }))
         };
 
@@ -83,7 +76,7 @@ app.post("/crear-qr", async (req, res) => {
         
         res.json({ qr_data: response.data.qr_data });
     } catch (error) {
-        console.error("[QR] Error API MP:", JSON.stringify(error.response?.data, null, 2));
+        console.error("[QR Error]", error.response?.data || error.message);
         res.status(500).json({ error: "Error en servidor externo" });
     }
 });
@@ -91,7 +84,6 @@ app.post("/crear-qr", async (req, res) => {
 app.post("/webhook", async (req, res) => {
     const dataId = req.query.id || req.body.data?.id || req.body.id;
     const topic = req.query.topic || req.query.type || req.body.type;
-    console.log(`[WEBHOOK] Recibido ${topic} con ID: ${dataId}`);
 
     try {
         let paymentId = dataId;
@@ -109,26 +101,29 @@ app.post("/webhook", async (req, res) => {
         });
 
         if (data.status === "approved") {
-            const socketId = socketClientes.get(data.external_reference);
+            // Desempaquetar los datos del external_reference
+            let meta = { email: data.payer?.email, referencias: [] };
+            try {
+                meta = JSON.parse(data.external_reference);
+            } catch(e) { meta.id = data.external_reference; }
+
+            const socketId = socketClientes.get(meta.id);
             if (socketId) io.to(socketId).emit("pago_aprobado", { success: true });
 
-            // Recuperamos datos desde metadata
-            const meta = data.metadata || {};
             const payloadGAS = {
                 funcion: "registrarPagoAutomatico",
-                correo: meta.correo || data.payer?.email || "sin_correo",
+                correo: meta.email || "sin_correo",
                 referencia: JSON.stringify(meta.referencias || []),
                 payment_id: paymentId,
                 monto: data.transaction_amount
             };
             
-            console.log("[GAS] Enviando payload:", JSON.stringify(payloadGAS, null, 2));
             await axios.post(GAS_URL, payloadGAS);
-            socketClientes.delete(data.external_reference);
+            socketClientes.delete(meta.id);
         }
         res.sendStatus(200);
     } catch (e) {
-        console.error("[ERROR WEBHOOK]", e.message);
+        console.error("[Webhook Error]", e.message);
         res.sendStatus(200);
     }
 });
