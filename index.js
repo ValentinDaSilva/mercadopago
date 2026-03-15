@@ -90,35 +90,52 @@ app.post("/crear-qr", async (req, res) => {
 
 // --- WEBHOOK ---
 app.post("/webhook", async (req, res) => {
+    // 1. Identificamos el ID del pago
     const paymentId = req.query.id || req.body.data?.id;
+    console.log("--- WEBHOOK RECIBIDO --- ID:", paymentId);
+    
     if (!paymentId) return res.sendStatus(200);
 
     try {
+        // 2. Consultamos el pago a Mercado Pago
         const { data } = await axios.get(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
             headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
         });
 
+        console.log("Estado del pago:", data.status);
+        console.log("Referencia externa:", data.external_reference);
+
         if (data.status === "approved") {
-            const ordenId = data.external_reference;
-            // Notificar por socket
-            const socketId = socketClientes.get(ordenId);
+            // 3. Notificar por socket (esto ya sabías que funciona)
+            const socketId = socketClientes.get(data.external_reference);
             if (socketId) io.to(socketId).emit("pago_aprobado", { success: true });
 
-            // Registrar en GAS
-            await axios.post(GAS_URL, {
+            // 4. LOG DE DIAGNÓSTICO PARA GAS
+            console.log("Preparando envío a GAS...");
+            const payload = {
                 funcion: "registrarPagoAutomatico",
-                correo: data.payer.email,
-                referencia: data.external_reference,
-                orden: ordenId,
+                correo: data.payer?.email || "sin_correo",
+                referencia: data.external_reference || "sin_ref",
+                orden: data.external_reference,
                 payment_id: paymentId,
                 monto: data.transaction_amount
-            });
+            };
+            console.log("Payload enviado a GAS:", payload);
+
+            // 5. Enviamos a GAS
+            const gasResponse = await axios.post(GAS_URL, payload);
+            console.log("Respuesta de GAS:", gasResponse.data);
         }
         res.sendStatus(200);
     } catch (e) {
+        console.error("Error en Webhook:", e.message);
+        // Si hay error en la petición a GAS, se verá aquí
+        if (e.response) console.error("Error respuesta GAS:", e.response.data);
         res.sendStatus(200);
     }
 });
+
+
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => console.log("Servidor activo puerto " + PORT));
