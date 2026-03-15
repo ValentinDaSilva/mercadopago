@@ -13,7 +13,6 @@ app.use(cors());
 app.use(express.json());
 
 const client = new MercadoPagoConfig({ accessToken: process.env.MP_ACCESS_TOKEN?.trim() });
-
 const GAS_URL = "https://script.google.com/macros/s/AKfycbwvSTFpClvlYupAvfgpR7YTvd90x7AN0t4EJZ5x7xarJ-ga1wRtWxNTDDy-Wm4judEX/exec";
 const MP_USER_ID = process.env.MP_USER_ID?.trim();
 const MP_POS_ID = process.env.MP_POS_ID?.trim();
@@ -21,160 +20,106 @@ const MP_POS_ID = process.env.MP_POS_ID?.trim();
 const socketClientes = new Map();
 
 io.on("connection", (socket) => {
-    socket.on("join", (ordenId) => socketClientes.set(ordenId, socket.id));
+    socket.on("join", (ordenId) => {
+        socketClientes.set(ordenId, socket.id);
+        console.log(`[SOCKET] Cliente unido. Orden: ${ordenId} | SocketID: ${socket.id}`);
+    });
 });
 
-// --- RUTA CREAR PREFERENCIA ---
 app.post("/crear-preferencia", async (req, res) => {
     try {
-        const { items, email, nombre, apellido } = req.body;
-        const ordenId = "orden_" + Date.now();
+        const { items, email, external_reference } = req.body;
+        console.log(`[PREFERENCIA] Creando para: ${external_reference}`);
+        
         const preference = new Preference(client);
-
         const response = await preference.create({
             body: {
-                items: items.map(i => ({
-                    id: i.codigo,
-                    title: i.title,
-                    description: "Clase particular universitaria",
-                    quantity: 1,
-                    currency_id: "ARS",
-                    unit_price: Number(i.price)
-                })),
-                payer: { email: email, first_name: nombre || "Alumno", last_name: apellido || "UTN" },
-                external_reference: ordenId,
-                auto_return: "approved",
-                back_urls: {
-                    success: "https://clasesparticularesutn.com.ar/Pagos/Exito.html",
-                    failure: "https://clasesparticularesutn.com.ar/Pagos/Fracaso.html"
-                },
+                items: items.map(i => ({ id: i.codigo, title: i.title, quantity: 1, currency_id: "ARS", unit_price: Number(i.price) })),
+                payer: { email: email },
+                external_reference: external_reference,
                 binary_mode: true
             }
         });
-        console.log("Preferencia creada:", response);
-        res.json({ init_point: response.init_point, orden_id: ordenId });
+        console.log(`[PREFERENCIA] Exitosa. ID: ${response.id}`);
+        res.json({ init_point: response.init_point });
     } catch (e) {
+        console.error("[ERROR PREFERENCIA]", e.message);
         res.status(500).json({ error: e.message });
     }
 });
 
-// --- RUTA CREAR QR ---
 app.post("/crear-qr", async (req, res) => {
     try {
-        const { items, email } = req.body;
+        const { items, email, external_reference } = req.body;
+        console.log(`[QR] Creando para: ${external_reference}`);
         const total = items.reduce((acc, i) => acc + Number(i.price), 0);
-        const ordenId = "ordenQR_" + Date.now();
-
-        const url = `https://api.mercadopago.com/instore/orders/qr/seller/collectors/${MP_USER_ID}/pos/${MP_POS_ID}/qrs`;
         
+        const url = `https://api.mercadopago.com/instore/orders/qr/seller/collectors/${MP_USER_ID}/pos/${MP_POS_ID}/qrs`;
         const response = await axios.post(url, {
-            external_reference: ordenId,
-            title: "Pago clases particulares",
-            description: "Clases universitarias", // Obligatorio nivel superior
+            external_reference: external_reference,
+            title: "Pago clases",
             total_amount: total,
-            items: items.map(i => ({
-                title: i.title,
-                description: "Clase particular universitaria", // OBLIGATORIO PARA CADA ITEM
-                unit_price: Number(i.price),
-                quantity: 1,
-                unit_measure: "unit",
-                total_amount: Number(i.price)
-            }))
+            items: items.map(i => ({ title: i.title, unit_price: Number(i.price), quantity: 1, total_amount: Number(i.price) }))
         }, { headers: { "Authorization": `Bearer ${process.env.MP_ACCESS_TOKEN}` } });
-        console.log("QR creado:", response.data);
-        res.json({ qr_data: response.data.qr_data, orden_id: ordenId });
+        
+        console.log(`[QR] Creado correctamente. Data: ${response.data.qr_data.substring(0, 20)}...`);
+        res.json({ qr_data: response.data.qr_data });
     } catch (error) {
-        console.error("Error QR:", error.response?.data || error.message);
-        res.status(500).json({ error: "Error creando QR", details: error.response?.data });
+        console.error("[ERROR QR]", error.response?.data || error.message);
+        res.status(500).json({ error: "Error creando QR" });
     }
 });
 
 app.post("/webhook", async (req, res) => {
-    // 1. Logs de entrada crudos
-    console.log("--- WEBHOOK RECIBIDO ---");
-    console.log("Query Params:", JSON.stringify(req.query));
-    console.log("Body:", JSON.stringify(req.body));
-    
-    // Identificar tipo de notificación
-    const topic = req.query.topic || req.query.type || req.body.type;
     const dataId = req.query.id || req.body.data?.id || req.body.id;
-
-    if (!dataId) {
-        console.warn("Webhook sin ID detectado, ignorando...");
-        return res.sendStatus(200);
-    }
+    const topic = req.query.topic || req.query.type || req.body.type;
+    console.log(`[WEBHOOK] Recibido ${topic} con ID: ${dataId}`);
 
     try {
         let paymentId = dataId;
-
-        // 2. Lógica para Merchant Orders (QR)
         if (topic === "merchant_order" || topic === "topic_merchant_order_wh") {
-            console.log("Detectada Merchant Order (ID:", dataId, "). Consultando orden...");
-            const orderResponse = await axios.get(`https://api.mercadopago.com/merchant_orders/${dataId}`, {
+            const order = await axios.get(`https://api.mercadopago.com/merchant_orders/${dataId}`, {
                 headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN?.trim()}` }
             });
-            
-            console.log("Respuesta de Orden:", JSON.stringify(orderResponse.data));
-            const approvedPayment = orderResponse.data.payments.find(p => p.status === 'approved');
-            
-            if (approvedPayment) {
-                paymentId = approvedPayment.id;
-                console.log("Pago encontrado dentro de la orden. ID:", paymentId);
+            const approved = order.data.payments.find(p => p.status === 'approved');
+            if (approved) {
+                paymentId = approved.id;
+                console.log(`[WEBHOOK] Orden encontrada. PaymentID: ${paymentId}`);
             } else {
-                console.log("No se encontró pago aprobado en esta orden aún.");
+                console.log("[WEBHOOK] No hay pago aprobado aún.");
                 return res.sendStatus(200);
             }
         }
 
-        // 3. Consultar estado del pago
-        console.log("Consultando estado del pago en API:", paymentId);
         const { data } = await axios.get(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
             headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN?.trim()}` }
         });
 
-        console.log("Estado final del pago:", data.status);
-
         if (data.status === "approved") {
-            console.log("Procesando pago aprobado. Referencia:", data.external_reference);
+            console.log(`[WEBHOOK] Pago ${paymentId} aprobado. Buscando socket: ${data.external_reference}`);
             
-            // 4. Notificación vía Socket
             const socketId = socketClientes.get(data.external_reference);
             if (socketId) {
-                console.log("Socket encontrado, emitiendo pago_aprobado a:", socketId);
-                io.to(socketId).emit("pago_aprobado", { success: true, paymentId });
+                console.log(`[WEBHOOK] ¡Socket encontrado! Emitiendo a ${socketId}`);
+                io.to(socketId).emit("pago_aprobado", { success: true });
             } else {
-                console.log("No se encontró socket activo para la orden:", data.external_reference);
+                console.warn(`[WEBHOOK] ALERTA: No se encontró socket para ${data.external_reference}. Clientes activos: ${socketClientes.size}`);
             }
 
-            // 5. Envío a Google Apps Script
-            const payload = {
+            await axios.post(GAS_URL, {
                 funcion: "registrarPagoAutomatico",
                 correo: data.payer?.email || "sin_correo",
                 referencia: data.external_reference,
-                orden: data.external_reference,
                 payment_id: paymentId,
                 monto: data.transaction_amount
-            };
-            console.log("Payload a enviar a GAS:", JSON.stringify(payload));
-            
-            const gasResponse = await axios.post(GAS_URL, payload);
-            console.log("Respuesta de GAS (Status):", gasResponse.status);
-            console.log("Cuerpo de respuesta GAS:", JSON.stringify(gasResponse.data));
-            
+            });
             socketClientes.delete(data.external_reference);
         }
-        
         res.sendStatus(200);
     } catch (e) {
-        console.error("--- ERROR EN WEBHOOK ---");
-        console.error("Mensaje:", e.message);
-        if (e.response) {
-            console.error("Datos error API:", JSON.stringify(e.response.data));
-        }
+        console.error("[ERROR WEBHOOK]", e.message);
         res.sendStatus(200);
     }
 });
 
-
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log("Servidor activo puerto " + PORT));
+server.listen(process.env.PORT || 3000, () => console.log("Servidor activo"));
