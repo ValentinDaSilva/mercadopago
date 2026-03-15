@@ -28,7 +28,7 @@ io.on("connection", (socket) => {
 
 app.post("/crear-preferencia", async (req, res) => {
     try {
-        const { items, email, external_reference } = req.body;
+        const { items, email, referencias, external_reference } = req.body;
         console.log(`[PREFERENCIA] Creando para: ${external_reference}`);
         
         const preference = new Preference(client);
@@ -37,41 +37,42 @@ app.post("/crear-preferencia", async (req, res) => {
                 items: items.map(i => ({ id: i.codigo, title: i.title, quantity: 1, currency_id: "ARS", unit_price: Number(i.price) })),
                 payer: { email: email },
                 external_reference: external_reference,
+                metadata: { referencias: referencias, correo: email }, // Guardamos metadata
                 binary_mode: true
             }
         });
-        console.log(`[PREFERENCIA] Exitosa. ID: ${response.id}`);
         res.json({ init_point: response.init_point });
     } catch (e) {
         console.error("[ERROR PREFERENCIA]", e.message);
         res.status(500).json({ error: e.message });
     }
 });
+
 app.post("/crear-qr", async (req, res) => {
-    const { items, email, external_reference } = req.body;
+    const { items, email, referencias, external_reference } = req.body;
     
     if (!external_reference || !items || items.length === 0) {
         return res.status(400).json({ error: "Datos incompletos" });
     }
 
     try {
-        console.log(`[QR] Iniciando creación para: ${external_reference}`);
+        console.log(`[QR] Iniciando para: ${external_reference}`);
         const total = items.reduce((acc, i) => acc + Number(i.price), 0);
-        
         const url = `https://api.mercadopago.com/instore/orders/qr/seller/collectors/${MP_USER_ID}/pos/${MP_POS_ID}/qrs`;
         
         const payload = {
             external_reference: external_reference,
             title: "Pago de clases",
-            description: "Pago de clases particulares UTN", // Descripción general obligatoria
+            description: "Pago de clases particulares UTN",
             total_amount: total,
+            // Guardamos referencias y correo en metadata para recuperar luego
+            metadata: { referencias: referencias, correo: email },
             items: items.map(i => ({ 
                 title: i.title, 
                 unit_price: Number(i.price), 
                 quantity: 1, 
                 total_amount: Number(i.price),
                 unit_measure: "unit",
-                // ESTA ES LA LÍNEA QUE FALTABA PARA CADA ITEM:
                 description: "Clase particular universitaria" 
             }))
         };
@@ -80,10 +81,9 @@ app.post("/crear-qr", async (req, res) => {
             headers: { "Authorization": `Bearer ${process.env.MP_ACCESS_TOKEN}` } 
         });
         
-        console.log(`[QR] Éxito. ID de orden de MP: ${response.data.in_store_order_id}`);
         res.json({ qr_data: response.data.qr_data });
     } catch (error) {
-        console.error("[QR] Error en API de MP:", JSON.stringify(error.response?.data, null, 2));
+        console.error("[QR] Error API MP:", JSON.stringify(error.response?.data, null, 2));
         res.status(500).json({ error: "Error en servidor externo" });
     }
 });
@@ -100,13 +100,8 @@ app.post("/webhook", async (req, res) => {
                 headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN?.trim()}` }
             });
             const approved = order.data.payments.find(p => p.status === 'approved');
-            if (approved) {
-                paymentId = approved.id;
-                console.log(`[WEBHOOK] Orden encontrada. PaymentID: ${paymentId}`);
-            } else {
-                console.log("[WEBHOOK] No hay pago aprobado aún.");
-                return res.sendStatus(200);
-            }
+            if (approved) paymentId = approved.id;
+            else return res.sendStatus(200);
         }
 
         const { data } = await axios.get(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
@@ -114,31 +109,21 @@ app.post("/webhook", async (req, res) => {
         });
 
         if (data.status === "approved") {
-            console.log(`[WEBHOOK] Pago ${paymentId} aprobado. Buscando socket: ${data.external_reference}`);
-            
             const socketId = socketClientes.get(data.external_reference);
-            if (socketId) {
-                console.log(`[WEBHOOK] ¡Socket encontrado! Emitiendo a ${socketId}`);
-                io.to(socketId).emit("pago_aprobado", { success: true });
-            } else {
-                console.warn(`[WEBHOOK] ALERTA: No se encontró socket para ${data.external_reference}. Clientes activos: ${socketClientes.size}`);
-            }
+            if (socketId) io.to(socketId).emit("pago_aprobado", { success: true });
 
-            // --- AQUÍ ESTÁ EL CAMBIO ---
+            // Recuperamos datos desde metadata
+            const meta = data.metadata || {};
             const payloadGAS = {
                 funcion: "registrarPagoAutomatico",
-                correo: data.payer?.email || "sin_correo",
-                referencia: data.external_reference,
+                correo: meta.correo || data.payer?.email || "sin_correo",
+                referencia: JSON.stringify(meta.referencias || []),
                 payment_id: paymentId,
                 monto: data.transaction_amount
             };
             
             console.log("[GAS] Enviando payload:", JSON.stringify(payloadGAS, null, 2));
-            
             await axios.post(GAS_URL, payloadGAS);
-            console.log("[GAS] Registro enviado correctamente.");
-            // ---------------------------
-            
             socketClientes.delete(data.external_reference);
         }
         res.sendStatus(200);
