@@ -47,26 +47,43 @@ app.post("/crear-preferencia", async (req, res) => {
         res.status(500).json({ error: e.message });
     }
 });
-
 app.post("/crear-qr", async (req, res) => {
+    const { items, email, external_reference } = req.body;
+    
+    // Validación de entrada
+    if (!external_reference || !items || items.length === 0) {
+        console.error("[VALIDACIÓN] Datos incompletos recibidos:", req.body);
+        return res.status(400).json({ error: "Datos incompletos" });
+    }
+
     try {
-        const { items, email, external_reference } = req.body;
-        console.log(`[QR] Creando para: ${external_reference}`);
+        console.log(`[QR] Iniciando creación para: ${external_reference}`);
         const total = items.reduce((acc, i) => acc + Number(i.price), 0);
         
         const url = `https://api.mercadopago.com/instore/orders/qr/seller/collectors/${MP_USER_ID}/pos/${MP_POS_ID}/qrs`;
-        const response = await axios.post(url, {
+        
+        const payload = {
             external_reference: external_reference,
             title: "Pago clases",
             total_amount: total,
-            items: items.map(i => ({ title: i.title, unit_price: Number(i.price), quantity: 1, total_amount: Number(i.price) }))
-        }, { headers: { "Authorization": `Bearer ${process.env.MP_ACCESS_TOKEN}` } });
+            items: items.map(i => ({ 
+                title: i.title, 
+                unit_price: Number(i.price), 
+                quantity: 1, 
+                total_amount: Number(i.price),
+                unit_measure: "unit" 
+            }))
+        };
+
+        const response = await axios.post(url, payload, { 
+            headers: { "Authorization": `Bearer ${process.env.MP_ACCESS_TOKEN}` } 
+        });
         
-        console.log(`[QR] Creado correctamente. Data: ${response.data.qr_data.substring(0, 20)}...`);
+        console.log(`[QR] Éxito. ID de orden de MP: ${response.data.in_store_order_id}`);
         res.json({ qr_data: response.data.qr_data });
     } catch (error) {
-        console.error("[ERROR QR]", error.response?.data || error.message);
-        res.status(500).json({ error: "Error creando QR" });
+        console.error("[QR] Error en API de MP:", JSON.stringify(error.response?.data, null, 2));
+        res.status(500).json({ error: "Error en servidor externo" });
     }
 });
 
