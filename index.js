@@ -29,10 +29,20 @@ io.on("connection", (socket) => {
 // Función auxiliar para empaquetar datos
 const getExternalReference = (data) => JSON.stringify(data);
 
+function safeParseExternalReference(externalReference) {
+    let meta = { email: undefined, referencias: [], id: undefined, tipoPago: undefined };
+    try {
+        meta = JSON.parse(externalReference);
+    } catch (e) {
+        meta.id = externalReference;
+    }
+    return meta;
+}
+
 app.post("/crear-preferencia", async (req, res) => {
     try {
-        const { items, email, referencias, external_reference } = req.body;
-        const refData = getExternalReference({ id: external_reference, email, referencias });
+        const { items, email, referencias, external_reference, tipoPago } = req.body;
+        const refData = getExternalReference({ id: external_reference, email, referencias, tipoPago });
 
         const preference = new Preference(client);
         const response = await preference.create({
@@ -50,13 +60,13 @@ app.post("/crear-preferencia", async (req, res) => {
 });
 
 app.post("/crear-qr", async (req, res) => {
-    const { items, email, referencias, external_reference } = req.body;
+    const { items, email, referencias, external_reference, tipoPago } = req.body;
     
     if (!external_reference || !items?.length) return res.status(400).json({ error: "Datos incompletos" });
 
     try {
         const total = items.reduce((acc, i) => acc + Number(i.price), 0);
-        const refData = getExternalReference({ id: external_reference, email, referencias });
+        const refData = getExternalReference({ id: external_reference, email, referencias, tipoPago });
         
         const url = `https://api.mercadopago.com/instore/orders/qr/seller/collectors/${MP_USER_ID}/pos/${MP_POS_ID}/qrs`;
         
@@ -97,35 +107,44 @@ app.post("/webhook", async (req, res) => {
             const order = await axios.get(`https://api.mercadopago.com/merchant_orders/${dataId}`, {
                 headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN?.trim()}` }
             });
-            const approved = order.data.payments.find(p => p.status === 'approved');
-            if (approved) paymentId = approved.id;
-            else return res.sendStatus(200);
+            const approved = order.data.payments.find(p => p.status === "approved");
+            if (approved) {
+                paymentId = approved.id;
+            } else {
+                // Si no hay aprobado, intentamos detectar rechazo/cancelación para notificar al frontend.
+                const rejected = order.data.payments.find(p => ["rejected", "cancelled"].includes(p.status));
+                if (rejected) paymentId = rejected.id;
+                else return res.sendStatus(200);
+            }
         }
 
         const { data } = await axios.get(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
             headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN?.trim()}` }
         });
 
-        if (data.status === "approved") {
-            // Desempaquetar los datos del external_reference
-            let meta = { email: data.payer?.email, referencias: [] };
-            try {
-                meta = JSON.parse(data.external_reference);
-            } catch(e) { meta.id = data.external_reference; }
+        // Desempaquetar los datos del external_reference (siempre que podamos)
+        const meta = safeParseExternalReference(data.external_reference);
+        if (!meta.email) meta.email = data.payer?.email;
 
-            const socketId = socketClientes.get(meta.id);
-            if (socketId) io.to(socketId).emit("pago_aprobado", { success: true });
+        const socketId = meta.id ? socketClientes.get(meta.id) : undefined;
+
+        if (data.status === "approved") {
+            if (socketId) io.to(socketId).emit("pago_aprobado", { success: true, tipoPago: meta.tipoPago });
 
             const payloadGAS = {
                 funcion: "registrarPagoAutomatico",
                 correo: meta.email || "sin_correo",
                 referencia: JSON.stringify(meta.referencias || []),
                 payment_id: paymentId,
-                monto: data.transaction_amount
+                monto: data.transaction_amount,
+                tipoPago: meta.tipoPago || "clase"
             };
-            
+
             await axios.post(GAS_URL, payloadGAS);
-            socketClientes.delete(meta.id);
+            if (meta.id) socketClientes.delete(meta.id);
+        } else if (["rejected", "cancelled"].includes(data.status)) {
+            if (socketId) io.to(socketId).emit("pago_rechazado", { status: data.status, tipoPago: meta.tipoPago });
+            if (meta.id) socketClientes.delete(meta.id);
         }
         res.sendStatus(200);
     } catch (e) {
