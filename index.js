@@ -61,12 +61,17 @@ app.post("/crear-qr", async (req, res) => {
         const url = `https://api.mercadopago.com/instore/orders/qr/seller/collectors/${MP_USER_ID}/pos/${MP_POS_ID}/qrs`;
         
         const payload = {
-            external_reference: refData, // Pasamos el JSON stringificado
+            external_reference: refData,
             title: "Pago de clases",
+            description: "Pago de clases particulares UTN", // Descripción global obligatoria
             total_amount: total,
             items: items.map(i => ({ 
-                title: i.title, unit_price: Number(i.price), quantity: 1, 
-                total_amount: Number(i.price), unit_measure: "unit", description: "Clase particular" 
+                title: i.title, 
+                unit_price: Number(i.price), 
+                quantity: 1, 
+                total_amount: Number(i.price),
+                unit_measure: "unit",
+                description: "Clase particular" // ESTA ES LA CLAVE PARA EL ERROR
             }))
         };
 
@@ -76,7 +81,8 @@ app.post("/crear-qr", async (req, res) => {
         
         res.json({ qr_data: response.data.qr_data });
     } catch (error) {
-        console.error("[QR Error]", error.response?.data || error.message);
+        // Mostramos el detalle completo del error de MP
+        console.error("[QR Error Detallado]:", JSON.stringify(error.response?.data, null, 2));
         res.status(500).json({ error: "Error en servidor externo" });
     }
 });
