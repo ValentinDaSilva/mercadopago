@@ -153,4 +153,8 @@ app.post("/webhook", async (req, res) => {
     }
 });
 
+app.get("/ping", (req, res) => {
+    res.status(200).send("OK");
+});
+
 server.listen(process.env.PORT || 3000, () => console.log("Servidor activo"));
