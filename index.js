@@ -39,6 +39,7 @@ function safeParseExternalReference(externalReference) {
     return meta;
 }
 
+
 app.post("/crear-preferencia", async (req, res) => {
     try {
         const { items, email, referencias, external_reference, tipoPago } = req.body;
