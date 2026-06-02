@@ -39,6 +39,28 @@ function safeParseExternalReference(externalReference) {
     return meta;
 }
 
+/** Arma el POST a GAS. tipoPago: clase | pack | horas | pack_horas | personalizado | admin */
+function buildPayloadGAS(meta, paymentId, monto) {
+    const referencias = meta.referencias || [];
+    const payload = {
+        funcion: "registrarPagoAutomatico",
+        correo: meta.email || "sin_correo",
+        referencia: JSON.stringify(referencias),
+        payment_id: paymentId,
+        monto,
+        tipoPago: meta.tipoPago || "clase"
+    };
+
+    const horasSueltas = referencias.find(
+        (r) => r && typeof r === "object" && r.tipo === "horas_sueltas"
+    );
+    if (horasSueltas) {
+        payload.modalidad = horasSueltas.modalidad;
+        payload.cantidadHoras = horasSueltas.cantidad;
+    }
+
+    return payload;
+}
 
 app.post("/crear-preferencia", async (req, res) => {
     try {
@@ -132,14 +154,8 @@ app.post("/webhook", async (req, res) => {
         if (data.status === "approved") {
             if (socketId) io.to(socketId).emit("pago_aprobado", { success: true, tipoPago: meta.tipoPago });
 
-            const payloadGAS = {
-                funcion: "registrarPagoAutomatico",
-                correo: meta.email || "sin_correo",
-                referencia: JSON.stringify(meta.referencias || []),
-                payment_id: paymentId,
-                monto: data.transaction_amount,
-                tipoPago: meta.tipoPago || "clase"
-            };
+            const payloadGAS = buildPayloadGAS(meta, paymentId, data.transaction_amount);
+            console.log("[GAS] registrarPagoAutomatico:", JSON.stringify(payloadGAS));
 
             await axios.post(GAS_URL, payloadGAS);
             if (meta.id) socketClientes.delete(meta.id);
