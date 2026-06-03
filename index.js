@@ -36,18 +36,80 @@ function safeParseExternalReference(externalReference) {
     } catch (e) {
         meta.id = externalReference;
     }
+    if (!Array.isArray(meta.referencias)) meta.referencias = [];
     return meta;
+}
+
+/** MP exige montos con ≤2 decimales; sumamos en centavos como en Pagos/index.html */
+function redondearPrecio(valor) {
+    const n = Number(valor);
+    if (!Number.isFinite(n)) return 0;
+    return Math.round(n * 100) / 100;
+}
+
+function totalDesdeItems(items, total_amount) {
+    if (total_amount != null && Number.isFinite(Number(total_amount))) {
+        return redondearPrecio(total_amount);
+    }
+    const cents = (items || []).reduce(
+        (acc, i) => acc + Math.round(redondearPrecio(i.price) * 100),
+        0
+    );
+    return cents / 100;
+}
+
+function metaOrdenQR(tipoPago) {
+    switch (tipoPago) {
+        case "horas":
+            return {
+                title: "Compra de horas",
+                description: "Horas individuales o sueltas — Clases Particulares UTN"
+            };
+        case "pack":
+            return {
+                title: "Compra de pack de horas",
+                description: "Pack de horas — Clases Particulares UTN"
+            };
+        case "pack_horas":
+            return {
+                title: "Compra de horas y packs",
+                description: "Packs y horas sueltas — Clases Particulares UTN"
+            };
+        case "personalizado":
+            return {
+                title: "Pago personalizado",
+                description: "Pago personalizado — Clases Particulares UTN"
+            };
+        case "admin":
+            return {
+                title: "Pago manual",
+                description: "Pago manual (admin) — Clases Particulares UTN"
+            };
+        default:
+            return {
+                title: "Pago de clases",
+                description: "Pago de clases particulares UTN"
+            };
+    }
+}
+
+function descripcionItem(tipoPago) {
+    if (tipoPago === "horas" || tipoPago === "pack_horas") return "Horas / pack UTN";
+    if (tipoPago === "pack") return "Pack de horas UTN";
+    return "Clase particular";
 }
 
 /** Arma el POST a GAS. tipoPago: clase | pack | horas | pack_horas | personalizado | admin */
 function buildPayloadGAS(meta, paymentId, monto) {
     const referencias = meta.referencias || [];
+    const precioPagado = redondearPrecio(monto);
     const payload = {
         funcion: "registrarPagoAutomatico",
         correo: meta.email || "sin_correo",
         referencia: JSON.stringify(referencias),
         payment_id: paymentId,
-        monto,
+        monto: precioPagado,
+        precio: precioPagado,
         tipoPago: meta.tipoPago || "clase"
     };
 
@@ -65,14 +127,23 @@ function buildPayloadGAS(meta, paymentId, monto) {
 app.post("/crear-preferencia", async (req, res) => {
     try {
         const { items, email, referencias, external_reference, tipoPago } = req.body;
+        if (!external_reference || !items?.length) {
+            return res.status(400).json({ error: "Datos incompletos" });
+        }
         const refData = getExternalReference({ id: external_reference, email, referencias, tipoPago });
 
         const preference = new Preference(client);
         const response = await preference.create({
             body: {
-                items: items.map(i => ({ id: i.codigo, title: i.title, quantity: 1, currency_id: "ARS", unit_price: Number(i.price) })),
+                items: items.map((i, idx) => ({
+                    id: String(i.codigo || i.packKey || `item_${idx}`),
+                    title: i.title,
+                    quantity: 1,
+                    currency_id: "ARS",
+                    unit_price: redondearPrecio(i.price)
+                })),
                 payer: { email: email },
-                external_reference: refData, // Pasamos el JSON stringificado
+                external_reference: refData,
                 binary_mode: true
             }
         });
@@ -83,29 +154,34 @@ app.post("/crear-preferencia", async (req, res) => {
 });
 
 app.post("/crear-qr", async (req, res) => {
-    const { items, email, referencias, external_reference, tipoPago } = req.body;
+    const { items, email, referencias, external_reference, tipoPago, total_amount } = req.body;
     
     if (!external_reference || !items?.length) return res.status(400).json({ error: "Datos incompletos" });
 
     try {
-        const total = items.reduce((acc, i) => acc + Number(i.price), 0);
+        const total = totalDesdeItems(items, total_amount);
         const refData = getExternalReference({ id: external_reference, email, referencias, tipoPago });
+        const { title, description } = metaOrdenQR(tipoPago);
+        const itemDescription = descripcionItem(tipoPago);
         
         const url = `https://api.mercadopago.com/instore/orders/qr/seller/collectors/${MP_USER_ID}/pos/${MP_POS_ID}/qrs`;
         
         const payload = {
             external_reference: refData,
-            title: "Pago de clases",
-            description: "Pago de clases particulares UTN", // Descripción global obligatoria
+            title,
+            description,
             total_amount: total,
-            items: items.map(i => ({ 
-                title: i.title, 
-                unit_price: Number(i.price), 
-                quantity: 1, 
-                total_amount: Number(i.price),
-                unit_measure: "unit",
-                description: "Clase particular" // ESTA ES LA CLAVE PARA EL ERROR
-            }))
+            items: items.map(i => {
+                const price = redondearPrecio(i.price);
+                return {
+                    title: i.title,
+                    unit_price: price,
+                    quantity: 1,
+                    total_amount: price,
+                    unit_measure: "unit",
+                    description: itemDescription
+                };
+            })
         };
 
         const response = await axios.post(url, payload, { 
