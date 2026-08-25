@@ -89,6 +89,60 @@ app.get("/ping", (req, res) => {
     res.status(200).send("OK");
 });
 
+// 🔍 DIAGNÓSTICO DE CUENTA MP / POS (para ver por qué se rechazan los pagos QR)
+// Entrar desde el navegador a: https://TU_BACKEND/debug-mp
+app.get("/debug-mp", async (req, res) => {
+    const resultado = {};
+    const headers = { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN?.trim()}` };
+
+    try {
+        // 1) Estado general de la cuenta vendedora
+        const user = await axios.get("https://api.mercadopago.com/users/me", { headers });
+        resultado.cuenta = {
+            id: user.data.id,
+            nickname: user.data.nickname,
+            site_status: user.data.site_status,          // debe ser "active"
+            country_id: user.data.country_id,
+            tags: user.data.tags,
+        };
+        console.log("[DEBUG-MP] Cuenta:", JSON.stringify(resultado.cuenta, null, 2));
+
+        if (user.data.id?.toString() !== MP_USER_ID) {
+            resultado.advertencia_user_id = `⚠️ El MP_ACCESS_TOKEN pertenece al usuario ${user.data.id}, pero MP_USER_ID está seteado como ${MP_USER_ID}. Deberían ser el mismo.`;
+            console.warn("[DEBUG-MP]", resultado.advertencia_user_id);
+        }
+    } catch (e) {
+        resultado.error_cuenta = e.response?.data || e.message;
+        console.error("[DEBUG-MP] Error consultando /users/me:", JSON.stringify(resultado.error_cuenta, null, 2));
+    }
+
+    try {
+        // 2) Estado del punto de venta (POS) usado para el QR
+        const pos = await axios.get(`https://api.mercadopago.com/pos?external_id=${MP_POS_ID}`, { headers });
+        resultado.pos = pos.data;
+        console.log("[DEBUG-MP] POS:", JSON.stringify(pos.data, null, 2));
+        if (!pos.data?.results?.length) {
+            resultado.advertencia_pos = `⚠️ No se encontró ningún POS con external_id="${MP_POS_ID}". El QR se genera igual, pero el POS puede no estar realmente operativo.`;
+            console.warn("[DEBUG-MP]", resultado.advertencia_pos);
+        }
+    } catch (e) {
+        resultado.error_pos = e.response?.data || e.message;
+        console.error("[DEBUG-MP] Error consultando /pos:", JSON.stringify(resultado.error_pos, null, 2));
+    }
+
+    try {
+        // 3) Tiendas (stores) asociadas a la cuenta
+        const stores = await axios.get(`https://api.mercadopago.com/users/${MP_USER_ID}/stores/search`, { headers });
+        resultado.stores = stores.data;
+        console.log("[DEBUG-MP] Stores:", JSON.stringify(stores.data, null, 2));
+    } catch (e) {
+        resultado.error_stores = e.response?.data || e.message;
+        console.error("[DEBUG-MP] Error consultando /stores:", JSON.stringify(resultado.error_stores, null, 2));
+    }
+
+    res.json(resultado);
+});
+
 // 💳 CREAR PREFERENCIA
 app.post("/crear-preferencia", async (req, res) => {
     try {
