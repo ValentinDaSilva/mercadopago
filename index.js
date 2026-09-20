@@ -27,7 +27,7 @@ const client = new MercadoPagoConfig({
     accessToken: process.env.MP_ACCESS_TOKEN?.trim()
 });
 
-const GAS_URL = "https://script.google.com/macros/s/AKfycbwvSTFpClvlYupAvfgpR7YTvd90x7AN0t4EJZ5x7xarJ-ga1wRtWxNTDDy-Wm4judEX/exec";
+const GAS_URL = "https://servidorusuarios.onrender.com";
 const MP_USER_ID = process.env.MP_USER_ID?.trim();
 const MP_POS_ID = process.env.MP_POS_ID?.trim();
 
