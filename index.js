@@ -58,6 +58,24 @@ function tomarDesglose(ordenId) {
     return entry.desglose;
 }
 
+// MP manda el webhook más de una vez para el mismo pago (se ve en los logs:
+// "topic_merchant_order_wh" llega duplicado). Sin esto, cada reenvío dispara
+// otra llamada a registrarPagosEnGAS y termina duplicando el registro del pago.
+const pagosProcesados = new Map();
+const PAGO_PROCESADO_TTL_MS = 1000 * 60 * 60 * 2; // 2 horas
+
+function yaFueProcesado(paymentId) {
+    const marca = pagosProcesados.get(paymentId);
+    return marca !== undefined && (Date.now() - marca) < PAGO_PROCESADO_TTL_MS;
+}
+
+function marcarProcesado(paymentId) {
+    pagosProcesados.set(paymentId, Date.now());
+    for (const [key, ts] of pagosProcesados) {
+        if (Date.now() - ts > PAGO_PROCESADO_TTL_MS) pagosProcesados.delete(key);
+    }
+}
+
 // 🔌 SOCKET.IO
 io.on("connection", (socket) => {
     socket.on("join", (ordenId) => {
@@ -79,6 +97,26 @@ function safeParseExternalReference(externalReference) {
     return meta;
 }
 
+// ServidorUsuarios (GAS_URL) vive en el free tier de Render, que se duerme a
+// los ~15 min sin tráfico y puede tardar 30-60s en volver a levantar (cold
+// start). Con un timeout de 20s, esos primeros pagos después de la siesta del
+// servidor se cortaban ANTES de que ServidorUsuarios llegue a responder (y en
+// muchos casos ni a recibir la petición completa) => "no le llega nada".
+// Por eso reintentamos con timeouts más generosos en vez de rendirnos al toque.
+async function postConReintentos(url, payload, { intentos = 3, timeoutMs = 45000, esperaMs = 8000 } = {}) {
+    let ultimoError;
+    for (let intento = 1; intento <= intentos; intento++) {
+        try {
+            return await axios.post(url, payload, { timeout: timeoutMs });
+        } catch (err) {
+            ultimoError = err;
+            console.error(`[GAS] Intento ${intento}/${intentos} falló | mensaje: ${err.message} | status: ${err.response?.status}`);
+            if (intento < intentos) await new Promise(r => setTimeout(r, esperaMs));
+        }
+    }
+    throw ultimoError;
+}
+
 // Llama a GAS una vez por cada "bloque" de la compra (clases sueltas / pack),
 // en el orden en que se pasen. Se espera cada llamado antes de hacer el siguiente
 // para garantizar que las clases se registren antes que el pack.
@@ -95,20 +133,19 @@ async function registrarPagosEnGAS({ email, paymentId, monto, bloques }) {
         };
         console.log(`[GAS] Registrando bloque | tipoPago: ${payloadGAS.tipoPago} | referencias:`, payloadGAS.referencia);
         try {
-            // Timeout explícito: sin esto, si GAS_URL está dormido (Render free tier)
-            // el pedido puede quedar colgado mucho tiempo sin loguear nada.
-            const respuesta = await axios.post(GAS_URL, payloadGAS, { timeout: 20000 });
+            const respuesta = await postConReintentos(GAS_URL, payloadGAS);
             console.log(`[GAS] Respuesta OK | tipoPago: ${payloadGAS.tipoPago} | status: ${respuesta.status} | data:`, respuesta.data);
         } catch (errGAS) {
             console.error(
-                `[GAS] ERROR llamando a GAS | tipoPago: ${payloadGAS.tipoPago} | referencias:`,
+                `[GAS] ERROR FINAL llamando a GAS (se agotaron los reintentos) | tipoPago: ${payloadGAS.tipoPago} | referencias:`,
                 payloadGAS.referencia,
+                '| paymentId:', paymentId,
                 '| mensaje:', errGAS.message,
                 '| status:', errGAS.response?.status,
                 '| data:', errGAS.response?.data
             );
-            // Re-lanzamos para que el catch general del webhook siga viéndolo
-            // (mantiene el comportamiento anterior, solo agregamos detalle acá).
+            // Re-lanzamos para que quien llama (el webhook) se entere de que este
+            // bloque quedó sin registrar y pueda loguearlo bien fuerte para revisarlo a mano.
             throw errGAS;
         }
     }
@@ -276,6 +313,12 @@ app.post("/webhook", async (req, res) => {
 
         const socketId = meta.id ? socketClientes.get(meta.id) : undefined;
 
+        // Le contestamos 200 a MP YA, antes de esperar a GAS. Si GAS está dormido
+        // (Render free tier) el registro puede tardar bastante con los reintentos
+        // de abajo, y si hacemos esperar a MP por eso, MP puede considerar que el
+        // webhook "falló" y reenviarlo, generando más duplicados todavía.
+        res.sendStatus(200);
+
         if (data.status === "approved") {
             if (socketId) {
                 io.to(socketId).emit("pago_aprobado", {
@@ -283,6 +326,17 @@ app.post("/webhook", async (req, res) => {
                     tipoPago: meta.tipoPago
                 });
             }
+
+            if (meta.id) socketClientes.delete(meta.id);
+
+            // MP reenvía notificaciones para el mismo pago (se ve en los logs de
+            // merchant_order duplicados). Sin este chequeo, cada reenvío intenta
+            // registrar el pago de nuevo en GAS.
+            if (yaFueProcesado(paymentId)) {
+                console.log(`[WEBHOOK] Payment ${paymentId} ya se había procesado, ignoro este reenvío del webhook.`);
+                return;
+            }
+            marcarProcesado(paymentId);
 
             // Si al crear la orden se guardó un "desglose" (pack + clases sueltas en la
             // misma compra), avisamos a GAS en dos llamados separados y en orden:
@@ -293,14 +347,19 @@ app.post("/webhook", async (req, res) => {
                 ? [desglose.clases, desglose.pack]
                 : [{ referencias: meta.referencias || [], tipoPago: meta.tipoPago || "clase" }];
 
-            await registrarPagosEnGAS({
-                email: meta.email,
-                paymentId,
-                monto: data.transaction_amount,
-                bloques
-            });
-
-            if (meta.id) socketClientes.delete(meta.id);
+            try {
+                await registrarPagosEnGAS({
+                    email: meta.email,
+                    paymentId,
+                    monto: data.transaction_amount,
+                    bloques
+                });
+            } catch (errGASFinal) {
+                // Ya se reintentó varias veces adentro de registrarPagosEnGAS y no se
+                // pudo. Esto queda bien marcado en los logs para revisar a mano:
+                // el pago SE COBRÓ en MP pero NO quedó registrado en ServidorUsuarios.
+                console.error(`[WEBHOOK] ⚠️ PAGO APROBADO SIN REGISTRAR EN GAS | paymentId: ${paymentId} | orden: ${meta.id} | email: ${meta.email}`);
+            }
         } else if (["rejected", "cancelled"].includes(data.status)) {
             if (socketId) {
                 io.to(socketId).emit("pago_rechazado", {
@@ -311,11 +370,9 @@ app.post("/webhook", async (req, res) => {
 
             if (meta.id) socketClientes.delete(meta.id);
         }
-
-        res.sendStatus(200);
     } catch (e) {
         console.error("[Webhook Error]", e.message, JSON.stringify(e.response?.data || {}, null, 2));
-        res.sendStatus(200);
+        if (!res.headersSent) res.sendStatus(200);
     }
 });
 
