@@ -88,7 +88,7 @@ async function registrarPagosEnGAS({ email, paymentId, monto, bloques }) {
         const payloadGAS = {
             funcion: "registrarPagoAutomatico",
             correo: email || "sin_correo",
-            referencia: JSON.stringify(bloque.referencias),
+            referencia: bloque.referencias, // array real: axios ya serializa todo el payload a JSON
             payment_id: paymentId,
             monto,
             tipoPago: bloque.tipoPago || "clase"
