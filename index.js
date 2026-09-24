@@ -94,7 +94,23 @@ async function registrarPagosEnGAS({ email, paymentId, monto, bloques }) {
             tipoPago: bloque.tipoPago || "clase"
         };
         console.log(`[GAS] Registrando bloque | tipoPago: ${payloadGAS.tipoPago} | referencias:`, payloadGAS.referencia);
-        await axios.post(GAS_URL, payloadGAS);
+        try {
+            // Timeout explícito: sin esto, si GAS_URL está dormido (Render free tier)
+            // el pedido puede quedar colgado mucho tiempo sin loguear nada.
+            const respuesta = await axios.post(GAS_URL, payloadGAS, { timeout: 20000 });
+            console.log(`[GAS] Respuesta OK | tipoPago: ${payloadGAS.tipoPago} | status: ${respuesta.status} | data:`, respuesta.data);
+        } catch (errGAS) {
+            console.error(
+                `[GAS] ERROR llamando a GAS | tipoPago: ${payloadGAS.tipoPago} | referencias:`,
+                payloadGAS.referencia,
+                '| mensaje:', errGAS.message,
+                '| status:', errGAS.response?.status,
+                '| data:', errGAS.response?.data
+            );
+            // Re-lanzamos para que el catch general del webhook siga viéndolo
+            // (mantiene el comportamiento anterior, solo agregamos detalle acá).
+            throw errGAS;
+        }
     }
 }
 
