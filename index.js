@@ -106,11 +106,27 @@ function safeParseExternalReference(externalReference) {
 async function postConReintentos(url, payload, { intentos = 3, timeoutMs = 45000, esperaMs = 8000 } = {}) {
     let ultimoError;
     for (let intento = 1; intento <= intentos; intento++) {
+        // 🔎 LOG DETALLADO: URL exacta, método y payload completo que se está mandando.
+        // Esto es lo que hay que mirar en los logs de Render para confirmar si la
+        // petición realmente sale hacia servidorusuarios y con qué contenido.
+        console.log(`[GAS→OUT] Intento ${intento}/${intentos} | POST ${url}`);
+        console.log(`[GAS→OUT] Payload:`, JSON.stringify(payload));
+
         try {
-            return await axios.post(url, payload, { timeout: timeoutMs });
+            const respuesta = await axios.post(url, payload, { timeout: timeoutMs });
+            // 🔎 LOG DETALLADO: qué contestó servidorusuarios (status + body completo).
+            console.log(`[GAS←IN] Respuesta | status: ${respuesta.status} | headers content-type: ${respuesta.headers?.["content-type"]}`);
+            console.log(`[GAS←IN] Body:`, JSON.stringify(respuesta.data));
+            return respuesta;
         } catch (err) {
             ultimoError = err;
-            console.error(`[GAS] Intento ${intento}/${intentos} falló | mensaje: ${err.message} | status: ${err.response?.status}`);
+            // 🔎 LOG DETALLADO: si axios ni siquiera recibió respuesta (err.response
+            // undefined) vs. si servidorusuarios respondió pero con error HTTP.
+            if (err.response) {
+                console.error(`[GAS←IN] Intento ${intento}/${intentos} falló CON respuesta del servidor | url: ${url} | status: ${err.response.status} | body:`, JSON.stringify(err.response.data));
+            } else {
+                console.error(`[GAS←IN] Intento ${intento}/${intentos} falló SIN respuesta del servidor (no llegó nada) | url: ${url} | código: ${err.code} | mensaje: ${err.message}`);
+            }
             if (intento < intentos) await new Promise(r => setTimeout(r, esperaMs));
         }
     }
@@ -121,6 +137,7 @@ async function postConReintentos(url, payload, { intentos = 3, timeoutMs = 45000
 // en el orden en que se pasen. Se espera cada llamado antes de hacer el siguiente
 // para garantizar que las clases se registren antes que el pack.
 async function registrarPagosEnGAS({ email, paymentId, monto, bloques }) {
+    console.log(`[GAS] URL configurada (GAS_URL): ${GAS_URL} | bloques a enviar: ${bloques.length}`);
     for (const bloque of bloques) {
         if (!bloque?.referencias?.length) continue;
         const payloadGAS = {
@@ -318,6 +335,7 @@ app.post("/webhook", async (req, res) => {
         // de abajo, y si hacemos esperar a MP por eso, MP puede considerar que el
         // webhook "falló" y reenviarlo, generando más duplicados todavía.
         res.sendStatus(200);
+        console.log(`[WEBHOOK] Ya respondí 200 a MP | paymentId: ${paymentId} | ahora intento registrar en servidorusuarios...`);
 
         if (data.status === "approved") {
             if (socketId) {
@@ -346,6 +364,8 @@ app.post("/webhook", async (req, res) => {
             const bloques = (desglose && desglose.clases && desglose.pack)
                 ? [desglose.clases, desglose.pack]
                 : [{ referencias: meta.referencias || [], tipoPago: meta.tipoPago || "clase" }];
+
+            console.log(`[WEBHOOK] meta.id (orden): ${meta.id} | meta.email: ${meta.email} | bloques:`, JSON.stringify(bloques));
 
             try {
                 await registrarPagosEnGAS({
@@ -381,4 +401,5 @@ const PORT = process.env.PORT || 8080;
 
 server.listen(PORT, "0.0.0.0", () => {
     console.log("Servidor activo en puerto", PORT);
+    console.log("[CONFIG] GAS_URL (destino de registrarPagoAutomatico):", GAS_URL);
 });
